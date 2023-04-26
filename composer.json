@@ -1,6 +1,7 @@
 {
     "description": "Proof of Concept of a simple Digital Asset Management built on top of the Event Sourced Content Repository",
     "type": "library",
+    "license": "MIT",
     "name": "wwwision/dam",
     "require": {
         "neos/contentrepository-core": "*",
@@ -10,5 +11,15 @@
         "psr-4": {
             "Wwwision\\DAM\\": "src/"
         }
-    }
+    },
+    "funding": [
+        {
+            "type": "github",
+            "url": "https://github.com/sponsors/bwaidelich"
+        },
+        {
+            "type": "paypal",
+            "url": "https://www.paypal.me/bwaidelich"
+        }
+    ],
 }
