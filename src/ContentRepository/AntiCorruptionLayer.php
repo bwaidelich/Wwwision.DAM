@@ -12,11 +12,14 @@ use Neos\ContentRepository\Core\Projection\ContentGraph\Filter\FindReferencesFil
 use Neos\ContentRepository\Core\Projection\ContentGraph\Filter\Ordering\Ordering;
 use Neos\ContentRepository\Core\Projection\ContentGraph\Filter\Ordering\OrderingDirection as CrOrderingDirection;
 use Neos\ContentRepository\Core\Projection\ContentGraph\Filter\Ordering\TimestampField;
+use Neos\ContentRepository\Core\Projection\ContentGraph\Filter\Pagination\Pagination;
 use Neos\ContentRepository\Core\Projection\ContentGraph\Node;
 use Neos\ContentRepository\Core\Projection\ContentGraph\Nodes;
+use Neos\ContentRepository\Core\Projection\ContentGraph\Subtree;
 use Neos\ContentRepository\Core\SharedModel\Node\PropertyName;
 use UnexpectedValueException;
 use Wwwision\DAM\Model\Asset;
+use Wwwision\DAM\Model\AssetCaption;
 use Wwwision\DAM\Model\AssetId;
 use Wwwision\DAM\Model\Assets;
 use Wwwision\DAM\Model\AssetType;
@@ -25,10 +28,15 @@ use Wwwision\DAM\Model\Filter\OrderingDirection;
 use Wwwision\DAM\Model\Filter\OrderingField;
 use Wwwision\DAM\Model\Folder;
 use Wwwision\DAM\Model\FolderId;
+use Wwwision\DAM\Model\FolderLabel;
 use Wwwision\DAM\Model\Folders;
+use Wwwision\DAM\Model\FolderTree;
+use Wwwision\DAM\Model\FolderWithChildren;
 use Wwwision\DAM\Model\Tag;
 use Wwwision\DAM\Model\TagId;
 use Wwwision\DAM\Model\Tags;
+use function date_date_set;
+use function dd;
 
 final class AntiCorruptionLayer
 {
@@ -37,15 +45,15 @@ final class AntiCorruptionLayer
     {
         if ($assetFilter->assetType !== null) {
             $nodeFilter = $nodeFilter->with(
-                nodeTypeConstraints: self::assetTypeToNodeTypeName($assetFilter->assetType)->value,
+                nodeTypes: self::assetTypeToNodeTypeName($assetFilter->assetType)->value,
             );
         } else {
             $nodeFilter = $nodeFilter->with(
-                nodeTypeConstraints: AssetNodeTypes::Asset->name()->value,
+                nodeTypes: AssetNodeTypes::Asset->name()->value,
             );
         }
         if ($assetFilter->searchTerm !== null) {
-            $nodeFilter = $nodeFilter->withSearchTerm($assetFilter->searchTerm->value);
+            $nodeFilter = $nodeFilter->with(searchTerm: $assetFilter->searchTerm->value);
         }
         if ($assetFilter->ordering !== null && property_exists($nodeFilter, 'ordering')) {
             $direction = $assetFilter->ordering->direction === OrderingDirection::DESCENDING ? CrOrderingDirection::DESCENDING : CrOrderingDirection::ASCENDING;
@@ -57,9 +65,9 @@ final class AntiCorruptionLayer
         }
         if (property_exists($nodeFilter, 'pagination')) {
             if ($assetFilter->pagination !== null) {
-                $nodeFilter = $nodeFilter->withPagination($assetFilter->pagination->limit, $assetFilter->pagination->offset);
+                $nodeFilter = $nodeFilter->with(pagination: Pagination::fromLimitAndOffset($assetFilter->pagination->limit, $assetFilter->pagination->offset));
             } else {
-                $nodeFilter = $nodeFilter->withPagination(20, 0);
+                $nodeFilter = $nodeFilter->with(pagination: Pagination::fromLimitAndOffset(20, 0));
             }
         }
         return $nodeFilter;
@@ -73,7 +81,7 @@ final class AntiCorruptionLayer
     public static function assetFromNode(Node $node): Asset
     {
         $assetValues = [
-            'id' => AssetId::fromString($node->nodeAggregateId->value),
+            'id' => AssetId::fromString($node->aggregateId->value),
         ];
         foreach ($node->properties as $propertyName => $propertyValue) {
             $assetValues[$propertyName] = $node->getProperty($propertyName);
@@ -81,6 +89,9 @@ final class AntiCorruptionLayer
         $assetValues['type'] = self::nodeTypeNameToAssetType($node->nodeTypeName);
         if (!isset($assetValues['dimensions'])) {
             $assetValues['dimensions'] = null;
+        }
+        if (!isset($assetValues['caption'])) {
+            $assetValues['caption'] = AssetCaption::fromString('');
         }
         return Asset::create(...$assetValues);
     }
@@ -93,10 +104,18 @@ final class AntiCorruptionLayer
     public static function tagFromNode(Node $node): Tag
     {
         $tagValues = [
-            'id' => TagId::fromString($node->nodeAggregateId->value),
+            'id' => TagId::fromString($node->aggregateId->value),
             ...$node->properties,
         ];
         return Tag::create(...$tagValues);
+    }
+
+    public static function folderWithChildrenFromSubtree(Subtree $folderSubtree): FolderWithChildren
+    {
+        return FolderWithChildren::create(
+            self::folderFromNode($folderSubtree->node),
+            array_map(self::folderWithChildrenFromSubtree(...), $folderSubtree->children),
+        );
     }
 
     public static function foldersFromNodes(Nodes $nodes): Folders
@@ -106,11 +125,10 @@ final class AntiCorruptionLayer
 
     public static function folderFromNode(Node $node): Folder
     {
-        $folderValues = [
-            'id' => FolderId::fromString($node->nodeAggregateId->value),
-            ...$node->properties
-        ];
-        return Folder::create(...$folderValues);
+        return Folder::create(
+            id: FolderId::fromString($node->aggregateId->value),
+            label: $node->getProperty('label') ?? FolderLabel::fromString('root'),
+        );
     }
 
     public static function assetTypeToNodeTypeName(AssetType $assetType): NodeTypeName

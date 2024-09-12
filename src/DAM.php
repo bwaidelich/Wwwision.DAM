@@ -15,18 +15,24 @@ use Neos\ContentRepository\Core\Feature\NodeReferencing\Command\SetNodeReference
 use Neos\ContentRepository\Core\Feature\NodeReferencing\Dto\NodeReferencesToWrite;
 use Neos\ContentRepository\Core\Feature\NodeRemoval\Command\RemoveNodeAggregate;
 use Neos\ContentRepository\Core\Feature\RootNodeCreation\Command\CreateRootNodeAggregateWithNode;
+use Neos\ContentRepository\Core\Feature\WorkspaceCreation\Command\CreateRootWorkspace;
+use Neos\ContentRepository\Core\Feature\WorkspaceCreation\Command\CreateWorkspace;
 use Neos\ContentRepository\Core\Projection\ContentGraph\ContentSubgraphInterface;
 use Neos\ContentRepository\Core\Projection\ContentGraph\Filter\CountChildNodesFilter;
 use Neos\ContentRepository\Core\Projection\ContentGraph\Filter\FindBackReferencesFilter;
 use Neos\ContentRepository\Core\Projection\ContentGraph\Filter\FindChildNodesFilter;
 use Neos\ContentRepository\Core\Projection\ContentGraph\Filter\FindDescendantNodesFilter;
 use Neos\ContentRepository\Core\Projection\ContentGraph\Filter\FindReferencesFilter;
+use Neos\ContentRepository\Core\Projection\ContentGraph\Filter\FindSubtreeFilter;
 use Neos\ContentRepository\Core\Projection\ContentGraph\VisibilityConstraints;
 use Neos\ContentRepository\Core\SharedModel\Node\NodeAggregateId;
 use Neos\ContentRepository\Core\SharedModel\Node\NodeAggregateIds;
 use Neos\ContentRepository\Core\SharedModel\Node\NodeVariantSelectionStrategy;
 use Neos\ContentRepository\Core\SharedModel\Node\ReferenceName;
 use Neos\ContentRepository\Core\SharedModel\Workspace\ContentStreamId;
+use Neos\ContentRepository\Core\SharedModel\Workspace\WorkspaceDescription;
+use Neos\ContentRepository\Core\SharedModel\Workspace\WorkspaceName;
+use Neos\ContentRepository\Core\SharedModel\Workspace\WorkspaceTitle;
 use Wwwision\DAM\Command\AddAsset;
 use Wwwision\DAM\Command\AddFolder;
 use Wwwision\DAM\Command\AddTag;
@@ -50,9 +56,11 @@ use Wwwision\DAM\Model\Filter\AssetFilter;
 use Wwwision\DAM\Model\Folder;
 use Wwwision\DAM\Model\FolderId;
 use Wwwision\DAM\Model\Folders;
+use Wwwision\DAM\Model\FolderWithChildren;
 use Wwwision\DAM\Model\Tag;
 use Wwwision\DAM\Model\TagId;
 use Wwwision\DAM\Model\Tags;
+use function date_date_set;
 
 /**
  * The central authority to query or mutate the DAM
@@ -69,19 +77,20 @@ final class DAM
     /**
      * Create required database tables and root nodes
      */
-    public function setUp(): void
+    public function setup(): void
     {
         $this->contentRepository->setUp();
+        $workspaceName = WorkspaceName::forLive();
         $csId = ContentStreamId::fromString('live');
 
-        if (!$this->contentRepository->getContentStreamFinder()->hasContentStream($csId)) {
-            $this->contentRepository->handle(new CreateContentStream($csId))->block();
+        if ($this->contentRepository->getWorkspaceFinder()->findOneByName($workspaceName) === null) {
+            $this->contentRepository->handle(CreateRootWorkspace::create($workspaceName, WorkspaceTitle::fromString('DAM Live Workspace'), WorkspaceDescription::fromString(''), $csId));
         }
 
         $tagsNode = $this->subgraph()->findNodeById(self::tagsNodeId());
         if ($tagsNode === null) {
-            $this->contentRepository->handle(new CreateRootNodeAggregateWithNode(
-                $csId,
+            $this->contentRepository->handle(CreateRootNodeAggregateWithNode::create(
+                $workspaceName,
                 self::tagsNodeId(),
                 AssetNodeTypes::Tags->name(),
             ));
@@ -89,11 +98,11 @@ final class DAM
 
         $assetsRootNode = $this->subgraph()->findNodeById(self::assetsRootNodeId());
         if ($assetsRootNode === null) {
-            $this->contentRepository->handle(new CreateRootNodeAggregateWithNode(
-                $csId,
+            $this->contentRepository->handle(CreateRootNodeAggregateWithNode::create(
+                $workspaceName,
                 self::assetsRootNodeId(),
                 AssetNodeTypes::Assets->name(),
-            ))->block();
+            ));
         }
     }
 
@@ -103,7 +112,7 @@ final class DAM
     public function findAssetById(AssetId $assetId): ?Asset
     {
         $assetNode = $this->subgraph()->findNodeById(NodeAggregateId::fromString($assetId->value));
-        if ($assetNode === null || !$assetNode->nodeType->isOfType(AssetNodeTypes::Asset->name()->value)) {
+        if ($assetNode === null || AssetNodeTypes::isAssetNodeType($assetNode->nodeTypeName)) {
             return null;
         }
         return AntiCorruptionLayer::assetFromNode($assetNode);
@@ -195,8 +204,20 @@ final class DAM
      */
     public function findFolders(): Folders
     {
-        $folderNodes = $this->subgraph()->findDescendantNodes(self::assetsRootNodeId(), FindDescendantNodesFilter::create()->with(nodeTypeConstraints: AssetNodeTypes::Folder->name()->value));
+        $filter = FindDescendantNodesFilter::create()->with(nodeTypes: AssetNodeTypes::Folder->name()->value);
+        $folderNodes = $this->subgraph()->findDescendantNodes(self::assetsRootNodeId(), $filter);
         return AntiCorruptionLayer::foldersFromNodes($folderNodes);
+    }
+
+    /**
+     * Return all folders
+     */
+    public function getFolderTree(): FolderWithChildren
+    {
+        $filter = FindSubtreeFilter::create()->with(nodeTypes: AssetNodeTypes::Folder->name()->value);
+        $folderSubtree = $this->subgraph()->findSubtree(self::assetsRootNodeId(), $filter);
+        assert($folderSubtree !== null);
+        return AntiCorruptionLayer::folderWithChildrenFromSubtree($folderSubtree);
     }
 
     /**
@@ -219,7 +240,7 @@ final class DAM
     public function findParentFolder(FolderId|AssetId $childFolderId): ?Folder
     {
         $folderNode = $this->subgraph()->findParentNode(NodeAggregateId::fromString($childFolderId->value));
-        if ($folderNode === null || $folderNode->nodeAggregateId->equals(self::assetsRootNodeId())) {
+        if ($folderNode === null || $folderNode->aggregateId->equals(self::assetsRootNodeId())) {
             return null;
         }
         return AntiCorruptionLayer::folderFromNode($folderNode);
@@ -230,7 +251,8 @@ final class DAM
      */
     public function findChildFolders(FolderId $parentFolderId): Folders
     {
-        $folderNodes = $this->subgraph()->findChildNodes(NodeAggregateId::fromString($parentFolderId->value), FindChildNodesFilter::create()->with(nodeTypeConstraints: AssetNodeTypes::Folder->name()->value));
+        $filter = FindChildNodesFilter::create()->with(nodeTypes: AssetNodeTypes::Folder->name()->value);
+        $folderNodes = $this->subgraph()->findChildNodes(NodeAggregateId::fromString($parentFolderId->value), $filter);
         return AntiCorruptionLayer::foldersFromNodes($folderNodes);
     }
 
@@ -276,14 +298,14 @@ final class DAM
             $initialPropertyValues['dimensions'] = $command->dimensions;
         }
 
-        $this->contentRepository->handle(new CreateNodeAggregateWithNode(
-            $this->contentStreamId(),
+        $this->contentRepository->handle(CreateNodeAggregateWithNode::create(
+            WorkspaceName::forLive(),
             NodeAggregateId::fromString($command->id->value),
             AntiCorruptionLayer::assetTypeToNodeTypeName($assetType),
             OriginDimensionSpacePoint::fromArray([]),
             $parentNodeAggregateId,
             initialPropertyValues: PropertyValuesToWrite::fromArray($initialPropertyValues),
-        ))->block();
+        ));
 
         if (!$command->initialTags->empty()) {
             $this->handleSetAssetTags(new SetAssetTags($command->id, $command->initialTags));
@@ -294,19 +316,18 @@ final class DAM
     {
         $folder = $this->findParentFolder($command->id);
         $folderId = $folder !== null ? $folder->id : self::assetsRootNodeId();
-        $this->contentRepository->handle(new RemoveNodeAggregate(
-            $this->contentStreamId(),
+        $this->contentRepository->handle(RemoveNodeAggregate::create(
+            WorkspaceName::forLive(),
             NodeAggregateId::fromString($command->id->value),
             DimensionSpacePoint::fromArray([]),
             NodeVariantSelectionStrategy::STRATEGY_ALL_VARIANTS,
-            NodeAggregateId::fromString($folderId->value),
-        ))->block();
+        ));
     }
 
     private function handleAddTag(AddTag $command): void
     {
-        $this->contentRepository->handle(new CreateNodeAggregateWithNode(
-            $this->contentStreamId(),
+        $this->contentRepository->handle(CreateNodeAggregateWithNode::create(
+            WorkspaceName::forLive(),
             NodeAggregateId::fromString($command->id->value),
             AssetNodeTypes::Tag->name(),
             OriginDimensionSpacePoint::fromArray([]),
@@ -314,59 +335,58 @@ final class DAM
             initialPropertyValues: PropertyValuesToWrite::fromArray([
                 'label' => $command->label,
             ]),
-        ))->block();
+        ));
     }
 
     private function handleRenameTag(RenameTag $command): void
     {
-        $this->contentRepository->handle(new SetNodeProperties(
-            $this->contentStreamId(),
+        $this->contentRepository->handle(SetNodeProperties::create(
+            WorkspaceName::forLive(),
             NodeAggregateId::fromString($command->id->value),
             OriginDimensionSpacePoint::fromArray([]),
             PropertyValuesToWrite::fromArray([
                 'label' => $command->newLabel,
             ]),
-        ))->block();
+        ));
     }
 
     private function handleAddTagToAsset(AddTagToAsset $command): void
     {
-        $this->contentRepository->handle(new SetNodeReferences(
-            $this->contentStreamId(),
+        $this->contentRepository->handle(SetNodeReferences::create(
+            WorkspaceName::forLive(),
             NodeAggregateId::fromString($command->assetId->value),
             OriginDimensionSpacePoint::fromArray([]),
             ReferenceName::fromString('tags'),
             NodeReferencesToWrite::fromNodeAggregateIds(NodeAggregateIds::fromArray([$command->tagId->value]))
-        ))->block();
+        ));
     }
 
     private function handleSetAssetTags(SetAssetTags $command): void
     {
-        $this->contentRepository->handle(new SetNodeReferences(
-            $this->contentStreamId(),
+        $this->contentRepository->handle(SetNodeReferences::create(
+            WorkspaceName::forLive(),
             NodeAggregateId::fromString($command->assetId->value),
             OriginDimensionSpacePoint::fromArray([]),
             ReferenceName::fromString('tags'),
             NodeReferencesToWrite::fromNodeAggregateIds(NodeAggregateIds::fromArray($command->tagIds->toStrings()))
-        ))->block();
+        ));
     }
 
     private function handleDeleteTag(DeleteTag $command): void
     {
-        $this->contentRepository->handle(new RemoveNodeAggregate(
-            $this->contentStreamId(),
+        $this->contentRepository->handle(RemoveNodeAggregate::create(
+            WorkspaceName::forLive(),
             NodeAggregateId::fromString($command->id->value),
             DimensionSpacePoint::fromArray([]),
             NodeVariantSelectionStrategy::STRATEGY_ALL_VARIANTS,
-            self::tagsNodeId(),
-        ))->block();
+        ));
     }
 
     private function handleAddFolder(AddFolder $command): void
     {
         $parentNodeAggregateId = $command->parentFolderId === null ? self::assetsRootNodeId() : NodeAggregateId::fromString($command->parentFolderId->value);
-        $this->contentRepository->handle(new CreateNodeAggregateWithNode(
-            $this->contentStreamId(),
+        $this->contentRepository->handle(CreateNodeAggregateWithNode::create(
+            WorkspaceName::forLive(),
             NodeAggregateId::fromString($command->id->value),
             AssetNodeTypes::Folder->name(),
             OriginDimensionSpacePoint::fromArray([]),
@@ -374,60 +394,53 @@ final class DAM
             initialPropertyValues: PropertyValuesToWrite::fromArray([
                 'label' => $command->label,
             ]),
-        ))->block();
+        ));
     }
 
     private function handleRenameFolder(RenameFolder $command): void
     {
-        $this->contentRepository->handle(new SetNodeProperties(
-            $this->contentStreamId(),
+        $this->contentRepository->handle(SetNodeProperties::create(
+            WorkspaceName::forLive(),
             NodeAggregateId::fromString($command->id->value),
             OriginDimensionSpacePoint::fromArray([]),
             PropertyValuesToWrite::fromArray([
                 'label' => $command->newLabel,
             ]),
-        ))->block();
+        ));
     }
 
     private function handleMoveFolder(MoveFolder $command): void
     {
         $newParentNodeAggregateId = $command->newParentFolderId === null ? self::assetsRootNodeId() : NodeAggregateId::fromString($command->newParentFolderId->value);
-        $this->contentRepository->handle(new MoveNodeAggregate(
-            $this->contentStreamId(),
+        $this->contentRepository->handle(MoveNodeAggregate::create(
+            WorkspaceName::forLive(),
             DimensionSpacePoint::fromArray([]),
             NodeAggregateId::fromString($command->id->value),
-            $newParentNodeAggregateId,
-            null,
-            null,
             RelationDistributionStrategy::STRATEGY_GATHER_ALL,
-        ))->block();
+            $newParentNodeAggregateId,
+        ));
     }
 
     private function handleDeleteFolder(DeleteFolder $command): void
     {
-        $parentFolder = $this->findParentFolder($command->id);
-        $parentFolderId = $parentFolder !== null ? $parentFolder->id : self::assetsRootNodeId();
-        $this->contentRepository->handle(new RemoveNodeAggregate(
-            $this->contentStreamId(),
+        $this->contentRepository->handle(RemoveNodeAggregate::create(
+            WorkspaceName::forLive(),
             NodeAggregateId::fromString($command->id->value),
             DimensionSpacePoint::fromArray([]),
             NodeVariantSelectionStrategy::STRATEGY_ALL_VARIANTS,
-            NodeAggregateId::fromString($parentFolderId->value),
-        ))->block();
+        ));
     }
 
     private function handleMoveAsset(MoveAsset $command): void
     {
         $newParentNodeAggregateId = $command->newParentFolderId === null ? self::assetsRootNodeId() : NodeAggregateId::fromString($command->newParentFolderId->value);
-        $this->contentRepository->handle(new MoveNodeAggregate(
-            $this->contentStreamId(),
+        $this->contentRepository->handle(MoveNodeAggregate::create(
+            WorkspaceName::forLive(),
             DimensionSpacePoint::fromArray([]),
             NodeAggregateId::fromString($command->assetId->value),
-            $newParentNodeAggregateId,
-            null,
-            null,
             RelationDistributionStrategy::STRATEGY_GATHER_ALL,
-        ))->block();
+            $newParentNodeAggregateId,
+        ));
     }
 
     /** ######## HELPERS ######## */
@@ -442,15 +455,10 @@ final class DAM
         return NodeAggregateId::fromString('assets');
     }
 
-    private function contentStreamId(): ContentStreamId
-    {
-        return ContentStreamId::fromString('live');
-    }
-
     private function subgraph(): ContentSubgraphInterface
     {
         if ($this->contentSubgraphRuntimeCache === null) {
-            $this->contentSubgraphRuntimeCache = $this->contentRepository->getContentGraph()->getSubgraph($this->contentStreamId(), DimensionSpacePoint::fromArray([]), VisibilityConstraints::withoutRestrictions());
+            $this->contentSubgraphRuntimeCache = $this->contentRepository->getContentGraph(WorkspaceName::forLive())->getSubgraph(DimensionSpacePoint::createWithoutDimensions(), VisibilityConstraints::withoutRestrictions());
         }
         return $this->contentSubgraphRuntimeCache;
     }

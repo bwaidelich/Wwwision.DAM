@@ -2,6 +2,7 @@
 declare(strict_types=1);
 namespace Wwwision\DAM\ContentRepository;
 
+use Neos\ContentRepository\Core\NodeType\NodeType;
 use Neos\ContentRepository\Core\NodeType\NodeTypeName;
 use Wwwision\DAM\Model\AssetCaption;
 use Wwwision\DAM\Model\AssetLabel;
@@ -32,6 +33,11 @@ enum AssetNodeTypes
     public function name(): NodeTypeName
     {
         return NodeTypeName::fromString('Wwwision.DAM:' . $this->name);
+    }
+
+    public static function isAssetNodeType(NodeTypeName $candidate): bool
+    {
+        return in_array($candidate->value, array_map(fn (self $type) => $type->name, [self::Image, self::Document, self::Video, self::Audio]), true);
     }
 
     public static function getConfiguration(): array

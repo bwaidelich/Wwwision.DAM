@@ -22,8 +22,19 @@ enum AssetType
         };
     }
 
+    public static function fromString(string $value): self
+    {
+        foreach (self::cases() as $case) {
+            if ($case->name === $value) {
+                return $case;
+            }
+        }
+        throw new \InvalidArgumentException(sprintf('Unknown asset type "%s".', $value));
+    }
+
     public function supportsDimensions(): bool
     {
         return in_array($this, [self::Image, self::Video], true);
     }
+
 }

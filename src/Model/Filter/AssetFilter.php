@@ -1,5 +1,6 @@
 <?php
 declare(strict_types=1);
+
 namespace Wwwision\DAM\Model\Filter;
 
 use Wwwision\DAM\Model\AssetType;
@@ -15,29 +16,43 @@ final class AssetFilter
         public readonly ?SearchTerm $searchTerm,
         public readonly ?Ordering $ordering,
         public readonly ?Pagination $pagination,
-    ) {}
-
-    public static function create(): self
-    {
-        return new self(null, null, null,null, null, null);
+    ) {
     }
 
-    public function with(
-        AssetType $assetType = null,
-        TagId $tagId = null,
-        FolderId $folderId = null,
-        SearchTerm $searchTerm = null,
+    /**
+     * @param Pagination|array{limit?:int,offset?:int}|null $pagination
+     */
+    public static function create(
+        AssetType|string $assetType = null,
+        TagId|string $tagId = null,
+        FolderId|string $folderId = null,
+        SearchTerm|string $searchTerm = null,
         Ordering $ordering = null,
-        Pagination $pagination = null,
+        Pagination|array $pagination = null,
     ): self
     {
+        if (is_string($assetType)) {
+            $assetType = AssetType::fromString($assetType);
+        }
+        if (is_string($tagId)) {
+            $tagId = TagId::fromString($tagId);
+        }
+        if (is_string($folderId)) {
+            $folderId = FolderId::fromString($folderId);
+        }
+        if (is_string($searchTerm)) {
+            $searchTerm = SearchTerm::fromString($searchTerm);
+        }
+        if (is_array($pagination)) {
+            $pagination = Pagination::fromArray($pagination);
+        }
         return new self(
-            $assetType ?? $this->assetType,
-            $tagId ?? $this->tagId,
-            $folderId ?? $this->folderId,
-            $searchTerm ?? $this->searchTerm,
-            $ordering ?? $this->ordering,
-            $pagination ?? $this->pagination,
+            $assetType,
+            $tagId,
+            $folderId,
+            $searchTerm,
+            $ordering,
+            $pagination,
         );
     }
 }
