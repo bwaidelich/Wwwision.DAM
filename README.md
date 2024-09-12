@@ -11,7 +11,8 @@ Proof of Concept of a simple Digital Asset Management built on top of the Event 
 
 > **Warning**
 > This package is not yet prepared to be installed on its own
-> See https://github.com/bwaidelich/Wwwision.Neos.DAM for an example integration into [Neos CMS](https://neos.io).
+> See https://github.com/bwaidelich/dam-example for a minimal example base upon [Slim](https://www.slimframework.com/)
+> Or https://github.com/bwaidelich/Wwwision.Neos.DAM for an example integration into [Neos CMS](https://neos.io).
 
 Install using [composer](https://getcomposer.org):
 
